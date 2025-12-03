@@ -282,40 +282,70 @@ class DecohesiveReport(PropertyReport):
 class Lat_param_T_Report(PropertyReport):
     @staticmethod
     def plotly_graph(res_data: dict, name: str, **kwargs):
-        lx = [values[0] for values in res_data.values()]
-        ly = [values[1] for values in res_data.values()]
-        lz = [values[2] for values in res_data.values()]
+        # Build a mapping temp(K) -> {a,b,c}
+        data = {}
+        for k, v in res_data.items():
+            if isinstance(v, (list, tuple)) and len(v) >= 4:
+                a, b, c, t = float(v[0]), float(v[1]), float(v[2]), float(v[3])
+            elif isinstance(v, dict):
+                a = float(v.get('a', 0.0)); b = float(v.get('b', 0.0)); c = float(v.get('c', 0.0)); t = float(v.get('temperature', 0.0))
+            else:
+                continue
+            data[float(t)] = {'a': a, 'b': b, 'c': c}
+        # Optional 0K from relaxation
+        relax_abc = kwargs.get('relax_abc')
+        if relax_abc and 0.0 not in data:
+            a0, b0, c0 = relax_abc
+            data[0.0] = {'a': float(a0), 'b': float(b0), 'c': float(c0)}
+        # Sort by temperature
+        temps = sorted(data.keys())
+        xs = [str(int(t)) if abs(t-round(t))<1e-6 else str(t) for t in temps]
+        ay = [data[t]['a'] for t in temps]
+        by = [data[t]['b'] for t in temps]
+        cy = [data[t]['c'] for t in temps]
 
-        temp = [values[3] for values in res_data.values()]
-        temp = [str(item) for item in temp]
-
-        trace_a = go.Scatter(x=temp, y=lx, mode='lines+markers', name='lx', line=dict(color='blue'))
-        trace_b = go.Scatter(x=temp, y=ly, mode='lines+markers', name='ly', line=dict(color='green'))
-        trace_c = go.Scatter(x=temp, y=lz , mode='lines+markers', name='lz', line=dict(color='red'))
-
-        trace = [trace_a, trace_b, trace_c]
+        trace_a = go.Scatter(x=xs, y=ay, mode='lines+markers', name='a', line=dict(color='blue'))
+        trace_b = go.Scatter(x=xs, y=by, mode='lines+markers', name='b', line=dict(color='green'))
+        trace_c = go.Scatter(x=xs, y=cy , mode='lines+markers', name='c', line=dict(color='red'))
 
         layout = go.Layout(
-            title='Lat_param_T',
-            xaxis=dict(title='temperature (K)', tickvals=temp),
-            yaxis=dict(title='lattice length (Å)'),
+            title='Lat_param_T (a,b,c vs T)',
+            xaxis=dict(title='Temperature (K)'),
+            yaxis=dict(title='Lattice length (Å)'),
             showlegend=True
         )
-        return trace, layout
+        return [trace_a, trace_b, trace_c], layout
 
     @staticmethod
     def dash_table(res_data: dict, decimal: int = 6, **kwargs) -> dash_table.DataTable:
-        lx = [values[0] for values in res_data.values()]
-        ly = [values[1] for values in res_data.values()]
-        lz = [values[2] for values in res_data.values()]
-        temp = [values[3] for values in res_data.values()]
-        temp = [str(item) for item in temp]
-        df = pd.DataFrame({
-            "temperature (K)": temp,
-            "lx (A)": round_format(lx, decimal),
-            "ly (A)": round_format(ly, decimal),
-            "lz (A)": round_format(lz, decimal),
-        })
+        # Build structure temp->(a,b,c)
+        data = {}
+        for k, v in res_data.items():
+            if isinstance(v, (list, tuple)) and len(v) >= 4:
+                a, b, c, t = float(v[0]), float(v[1]), float(v[2]), float(v[3])
+            elif isinstance(v, dict):
+                a = float(v.get('a', 0.0)); b = float(v.get('b', 0.0)); c = float(v.get('c', 0.0)); t = float(v.get('temperature', 0.0))
+            else:
+                continue
+            data[float(t)] = {'a': a, 'b': b, 'c': c}
+        # Optional 0K from relaxation
+        relax_abc = kwargs.get('relax_abc')
+        if relax_abc and 0.0 not in data:
+            a0, b0, c0 = relax_abc
+            data[0.0] = {'a': float(a0), 'b': float(b0), 'c': float(c0)}
+        temps = sorted(data.keys())
+        rows = []
+        for t in temps:
+            a = data[t]['a']; b = data[t]['b']; c = data[t]['c']
+            ca = (c/a) if a else 0.0
+            rows.append({
+                'Temp (K)': int(t) if abs(t-round(t))<1e-6 else t,
+                'a (A)': round(a, decimal),
+                'b (A)': round(b, decimal),
+                'c (A)': round(c, decimal),
+                'c/a': round(ca, decimal),
+            })
+        df = pd.DataFrame(rows)
         table = dash_table.DataTable(
             data=df.to_dict('records'),
             columns=[{'name': i, 'id': i} for i in df.columns],

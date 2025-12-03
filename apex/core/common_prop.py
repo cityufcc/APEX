@@ -14,6 +14,7 @@ from apex.core.property.Vacancy import Vacancy
 from apex.core.property.Phonon import Phonon
 from apex.core.property.Decohesive import Decohesive
 from apex.core.property.Lat_param_T import Lat_param_T
+from apex.core.property.Annealing import Annealing
 from apex.core.lib.utils import create_path
 from apex.core.lib.util import collect_task
 from apex.core.lib.dispatcher import make_submission
@@ -48,6 +49,8 @@ def make_property_instance(parameters, inter_param):
         return Decohesive(parameters, inter_param)
     elif prop_type == "Lat_param_T":
         return Lat_param_T(parameters, inter_param)
+    elif prop_type in ["annealing", "Annealing"]:
+        return Annealing(parameters, inter_param)
     else:
         raise RuntimeError(f"unknown APEX type {prop_type}")
 

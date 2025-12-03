@@ -38,14 +38,34 @@ class Lat_param_T(Property):
             # parameter["cal_setting"]["input_prop"] = "lammps_input/lat_param_T/in.lammps"
         if not self.reprod:
             if not ("init_from_suffix" in parameter and "output_suffix" in parameter):
-                parameter["supercell_size"] = parameter.get("supercell_size",[2,2,2])
-                self.supercell_size = parameter["supercell_size"]
-                parameter["cal_setting"]["temperature"] = parameter["cal_setting"].get("temperature", [200,400,600,800])
-                parameter["cal_setting"]["equi_step"] = parameter["cal_setting"].get("equi_step", 80000)
-                parameter["cal_setting"]["N_every"] = parameter["cal_setting"].get("N_every", 100)
-                parameter["cal_setting"]["N_repeat"] = parameter["cal_setting"].get("N_repeat", 10)
-                parameter["cal_setting"]["N_freq"] = parameter["cal_setting"].get("N_freq", 2000)
-                parameter["cal_setting"]["ave_step"] = parameter["cal_setting"].get("ave_step", 40000)
+                # Either explicit replication or target physical size (in A)
+                self.supercell_size = parameter.get("supercell_size", [2, 2, 2])
+                self.supercell_length = parameter.get("supercell_length", None)
+                parameter["supercell_size"] = self.supercell_size
+                # Core MD controls
+                cal = parameter["cal_setting"]
+                cal["temperature"] = cal.get("temperature", [200, 400, 600, 800])
+                cal["equi_step"] = cal.get("equi_step", 80000)
+                # Accept TiAl-style aliases and map到 APEX；只保留独立变量
+                if "sample_interval" in cal:
+                    cal["N_every"] = cal.get("N_every", cal["sample_interval"])  # Nevery
+                if "num_sample" in cal:
+                    cal["N_repeat"] = cal.get("N_repeat", cal["num_sample"])    # Nrepeat
+                # 设置默认独立变量
+                cal["N_every"] = cal.get("N_every", 100)
+                cal["N_repeat"] = cal.get("N_repeat", 10)
+                # 非独立变量：N_freq 始终由 N_every*N_repeat 派生
+                cal["N_freq"] = cal["N_every"] * cal["N_repeat"]
+                # 清理输入中的非独立别名，避免困惑
+                cal.pop("num_measure", None)
+                cal["ave_step"] = cal.get("ave_step", 40000)
+                # Optional thermostat/ensemble knobs (defaults align with existing behavior)
+                cal["thermostat"] = cal.get("thermostat", "nose_hoover")
+                cal["ensemble"] = cal.get("ensemble", "isothermal")
+                cal["tdamp"] = cal.get("tdamp", 100)
+                cal["pdamp"] = cal.get("pdamp", 1000)
+                cal["velocity_seed"] = cal.get("velocity_seed", 12345)
+                cal["dump_step"] = cal.get("dump_step", 100)
         else:
             parameter["init_from_suffix"] = parameter.get("init_from_suffix", "00")
             self.init_from_suffix = parameter["init_from_suffix"]
@@ -112,14 +132,23 @@ class Lat_param_T(Property):
                     CONTCAR = "CONTCAR"
                     POSCAR = "POSCAR"
                 equi_contcar = os.path.join(path_to_equi, CONTCAR)
-                if not os.path.exists(equi_contcar):
-                    raise RuntimeError("please do relaxation first")
+                fallback_poscar = os.path.join(os.path.dirname(path_to_equi), POSCAR)
+                # prefer relaxed CONTCAR; fallback to initial POSCAR under conf dir
+                if os.path.isfile(equi_contcar):
+                    src_pos = equi_contcar
+                elif os.path.isfile(fallback_poscar):
+                    src_pos = fallback_poscar
+                else:
+                    raise RuntimeError(
+                        f"cannot find relaxed CONTCAR or initial POSCAR (checked: {equi_contcar} and {fallback_poscar}).\n"
+                        "Do relaxation first or provide POSCAR under the conf directory."
+                    )
                 # get structure
                 if self.inter_param["type"] == "abacus":
                     raise TypeError("Lat_param_T only support lammps calculation")
                 else:
-                    ptypes = vasp_utils.get_poscar_types(equi_contcar)
-                    ss = Structure.from_file(equi_contcar)
+                    ptypes = vasp_utils.get_poscar_types(src_pos)
+                    ss = Structure.from_file(src_pos)
                 '''
                 based on temperature build the dir
                 copy the contcar in equi to each dir              
@@ -146,6 +175,20 @@ class Lat_param_T(Property):
                     ss.to("POSCAR.tmp", "POSCAR")
                     vasp_utils.regulate_poscar("POSCAR.tmp", "POSCAR")
                     vasp_utils.sort_poscar("POSCAR", "POSCAR", ptypes)
+                    # Infer replication counts from target physical size if requested
+                    if getattr(self, "supercell_length", None) is not None:
+                        try:
+                            s_pm = Structure.from_file("POSCAR")
+                            a, b, c = s_pm.lattice.abc
+                            import math
+                            sx, sy, sz = self.supercell_length
+                            nx = max(1, int(math.ceil(sx / a)))
+                            ny = max(1, int(math.ceil(sy / b)))
+                            nz = max(1, int(math.ceil(sz / c)))
+                            self.supercell_size = [nx, ny, nz]
+                            self.parameter["supercell_size"] = self.supercell_size
+                        except Exception as e:
+                            logging.warning(f"Failed to derive supercell_size from supercell_length: {e}")
                     # Lat_param_T.json
                     temp = self.parameter["cal_setting"]["temperature"][ii]
                     Lat_param_T_task = {"temperature":temp, "supercell_size":self.supercell_size}
@@ -206,14 +249,19 @@ class Lat_param_T(Property):
 
                 structure_dir = os.path.basename(ii)
 
-                ptr_data += "%-25s  %7.6f  %7.6f  %7.6f \n" %(
+                c_over_a = (c / a) if a else 0.0
+                ptr_data += "%-25s  %7.6f  %7.6f  %7.6f  %7.6f\n" % (
                     str(temp) + ":",
-                    a, b, c
+                    a, b, c, c_over_a,
                 )
 
-                res_data[str(temp)] = [
-                    a, b, c, temp
-                ]
+                res_data[str(temp)] = {
+                    "a": a,
+                    "b": b,
+                    "c": c,
+                    "c_over_a": c_over_a,
+                    "temperature": temp,
+                }
 
             with open(output_file, 'w') as fp:
                 json.dump(res_data, fp, indent=4)

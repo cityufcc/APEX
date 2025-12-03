@@ -281,6 +281,27 @@ class Lammps(Task):
                 else:
                     raise RuntimeError("not supported calculation setting for LAMMPS")
 
+            elif cal_type == "npt+ave/time" and task_type == "Lat_param_T":
+                # Finite-T lattice parameter sampling (TiAl-style):
+                # build an NPT/NPH workflow and average box lengths
+                fc = lammps_utils.make_lammps_Lat_param_T(
+                    "conf.lmp",
+                    self.type_map,
+                    self.inter_func,
+                    self.model_param,
+                    cal_setting,
+                )
+
+            elif task_type in ["annealing", "Annealing"]:
+                # MD annealing schedule: equilibrate -> ramp -> hold -> cool
+                fc = lammps_utils.make_lammps_annealing(
+                    "conf.lmp",
+                    self.type_map,
+                    self.inter_func,
+                    self.model_param,
+                    cal_setting,
+                )
+
             elif cal_type == "static":
                 fc = lammps_utils.make_lammps_eval(
                     "conf.lmp", self.type_map, self.inter_func, self.model_param
@@ -533,6 +554,8 @@ class Lammps(Task):
             return ["conf.lmp", "in.lammps"] + list(map(os.path.basename, self.model))
         elif property_type == "Lat_param_T":
             return ["in.lammps", "variable_Lat_param_T.in", os.path.basename(self.model)]
+        elif property_type in ["annealing", "Annealing"]:
+            return ["in.lammps", "variable_Annealing.in", os.path.basename(self.model)]
         else:
             return ["conf.lmp", "in.lammps", os.path.basename(self.model)]
 
@@ -542,6 +565,8 @@ class Lammps(Task):
                 return ["in.lammps"] + list(map(os.path.basename, self.model))
             elif property_type == "Lat_param_T":
                 return ["in.lammps", "variable_Lat_param_T.in", os.path.basename(self.model)]
+            elif property_type in ["annealing", "Annealing"]:
+                return ["in.lammps", "variable_Annealing.in", os.path.basename(self.model)]
             else:
                 return ["in.lammps", os.path.basename(self.model)]
         else:
@@ -555,6 +580,7 @@ class Lammps(Task):
             return ["outlog", "FORCE_CONSTANTS"]
         elif property_type == "Lat_param_T":
             return ["log.lammps", "outlog", "dump.relax", "average_box.txt"]
+        elif property_type in ["annealing", "Annealing"]:
+            return ["log.lammps", "outlog", "dump.anneal_ramp", "dump.anneal_cool", "restart.*"]
         else:
             return ["log.lammps", "outlog", "dump.relax"]
-
