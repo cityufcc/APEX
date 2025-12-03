@@ -701,10 +701,10 @@ Outputs per task:
 - `log.lammps`
 
 Reporting:
-- `apex report` 会自动读取上述 interval 文件和 RDF，绘制两张图：
-  - 体积随温度变化的散点图（加热=暖色，降温=冷色）
-  - g(r) 曲线（取 `rdf_cool.dat` 最后一个时间块）
-- 报告既可从 `all_result.json` 读取，也支持在未归档时直接扫描工作目录（目录兜底）。
+- `apex report` automatically reads the interval files and RDF and renders two figures:
+  - Volume vs Temperature scatter (heating = warm colors, cooling = cool colors)
+  - g(r) curve (taken from the last time block of `rdf_cool.dat`)
+- The report can read from `all_result.json`, or fall back to scanning the work directory when archiving is not done.
 
 Example (property block):
 ```json
