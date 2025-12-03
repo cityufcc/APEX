@@ -32,6 +32,8 @@ APEX currently offers calculation methods for the following alloy properties:
 * Vacancy formation energy
 * Generalized stacking fault energy (Gamma line)
 * Phonon spectra
+* Finite‑T lattice parameters (Lat_param_T)
+* Annealing (MD schedule)
 
 ## What's Inside
 - [1. Installation](#1installation)
@@ -58,7 +60,9 @@ APEX currently offers calculation methods for the following alloy properties:
   - [4.6 Vacancy](#vacancy)
   - [4.7 Interstitial](#interstitial)
   - [4.8 Gamma Line](#gamma-line-generalised-stacking-fault)
-  - [4.9 Phonon Spectra](#phonon-spectra)
+- [4.9 Phonon Spectra](#phonon-spectra)
+  - [4.10 Finite‑T Lattice Parameters](#finite-t-lattice-parameters)
+  - [4.11 Annealing](#annealing)
 - [More Resources](#more-resources)
 
 ## 1.Installation
@@ -605,6 +609,127 @@ APEX integrates parts of [dflow-phonon](https://github.com/Chengqian-Zhang/dflow
 | `seekpath_param` | Dict | `None` | Extra arguments passed to SeeK-path. |
 
 The linear-response method accelerates calculations for metallic systems, while the finite-displacement approach works with any calculator that can provide forces (e.g., ABACUS).
+
+#### Finite‑T lattice parameters
+
+Compute the temperature dependence of lattice parameters by short NPT/NPH MD followed by time‑averaging of the box lengths. This is implemented for LAMMPS as property type `Lat_param_T`.
+
+- Calculator: LAMMPS
+- Template: `apex/core/template/lammps/calc/Lat_param_T/in.lammps` (placeholders are auto‑filled)
+- Variable file per task: `variable_Lat_param_T.in`
+- Fallback structure: if relaxed `CONTCAR` is missing, the initial `POSCAR` under the conf dir is used
+
+Key inputs (JSON):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `type` | String | — | Use `"Lat_param_T"` |
+| `supercell_size` | [Int,Int,Int] | `[2,2,2]` | Replication along a/b/c |
+| `supercell_length` | [Float,Float,Float] | `None` | Alternative to `supercell_size`: minimum physical box lengths (Å) to derive integer replications |
+| `cal_setting.temperature` | [Float,…] | `[200,400,600,800]` | Sampling temperatures (K) |
+| `cal_setting.equi_step` | Int | `80000` | MD steps for equilibration |
+| `cal_setting.N_every` | Int | `100` | `fix ave/time` Nevery |
+| `cal_setting.N_repeat` | Int | `10` | `fix ave/time` Nrepeat |
+| `cal_setting.N_freq` | Int | `N_every*N_repeat` | Derived; no need to set when `N_every`/`N_repeat` provided |
+| `cal_setting.ave_step` | Int | `40000` | MD steps for averaging |
+| `cal_setting.thermostat` | String | `"nose_hoover"` | `"nose_hoover"` or `"langevin"` |
+| `cal_setting.ensemble` | String | `"isothermal"` | `"isothermal"` (NPT) or `"adiabatic"` (NPH) |
+| `cal_setting.tdamp/pdamp` | Float | `100/1000` | Thermostat/barostat damping (time units of LAMMPS `metal`) |
+| `cal_setting.velocity_seed` | Int | `12345` | Random seed for `velocity create` |
+| `cal_setting.dump_step` | Int | `100` | Dump interval |
+
+Special variables in the input template:
+- `temperature`: current task temperature (K)
+- `temp_init`: derived initial temperature equal to `2*${temperature}`; used only for `velocity create` if desired
+
+Outputs per task:
+- `average_box.txt` (time‑averaged `lx ly lz`)
+- `log.lammps`, `dump.relax`
+- Collected results in `result.json` as a mapping `temp -> {a,b,c,c_over_a}` (averages are per primitive lattice via supercell division)
+
+Example (property block):
+```json
+{
+  "type": "Lat_param_T",
+  "supercell_size": [6, 6, 6],
+  "cal_setting": {
+    "temperature": [300, 600, 900],
+    "equi_step": 20000,
+    "N_every": 100,
+    "N_repeat": 10,
+    "ave_step": 5000,
+    "thermostat": "nose_hoover",
+    "ensemble": "isothermal",
+    "velocity_seed": 12345,
+    "dump_step": 200
+  }
+}
+```
+
+#### Annealing
+
+Run an MD annealing schedule: equilibrate at `start_temp`, heat to `target_temp`, optional hold, then cool to `end_temp`. Implemented for LAMMPS as property type `annealing`/`Annealing`.
+
+- Calculator: LAMMPS
+- Template: `apex/core/template/lammps/calc/Annealing/in.lammps`
+- Variable file per task: `variable_Annealing.in`
+
+Key inputs (JSON):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `type` | String | — | `"annealing"` or `"Annealing"` |
+| `supercell_size` | [Int,Int,Int] | `[2,2,2]` | Replication along a/b/c |
+| `cal_setting.start_temp` | Float | 300 | Start temperature (K) |
+| `cal_setting.target_temp` | Float or [Float,…] | 800 | Target temperature(s) (K) |
+| `cal_setting.end_temp` | Float | 300 | End temperature (K) |
+| `cal_setting.equi_step` | Int | 10000 | Steps at start_temp |
+| `cal_setting.ramp_step` | Int | 20000 | Steps to heat to target |
+| `cal_setting.hold_step` | Int | 0 | Optional hold at target |
+| `cal_setting.cool_step` | Int | 20000 | Steps to cool to end |
+| `cal_setting.timestep` | Float | 0.002 | LAMMPS timestep (ps, units metal) |
+| `cal_setting.thermostat` | String | `"nose_hoover"` | `"nose_hoover"` or `"langevin"` |
+| `cal_setting.ensemble` | String | `"npt"` | For nose_hoover: `npt`/`nvt`; for langevin: `nph`/`nve` |
+| `cal_setting.tdamp/pdamp` | Float | `100/1000` | Damping constants |
+| `cal_setting.velocity_seed` | Int | 12345 | Random seed |
+| `cal_setting.dump_step` | Int | 1000 | Dump interval |
+| `cal_setting.rdf_bins/rdf_cutoff/rdf_interval` | Int/Float/Int | 200/10.0/100 | RDF settings |
+
+Outputs per task:
+- `heating_interval.dat`, `cooling_interval.dat` with columns: `TimeStep Temp Vatom pote Etotal Press`
+- `dump.anneal_ramp`, `dump.anneal_cool`, `rdf_cool.dat` (fix ave/time)
+- `log.lammps`
+
+Reporting:
+- `apex report` 会自动读取上述 interval 文件和 RDF，绘制两张图：
+  - 体积随温度变化的散点图（加热=暖色，降温=冷色）
+  - g(r) 曲线（取 `rdf_cool.dat` 最后一个时间块）
+- 报告既可从 `all_result.json` 读取，也支持在未归档时直接扫描工作目录（目录兜底）。
+
+Example (property block):
+```json
+{
+  "type": "Annealing",
+  "supercell_size": [2, 2, 2],
+  "cal_setting": {
+    "start_temp": 300,
+    "target_temp": 900,
+    "end_temp": 300,
+    "equi_step": 10000,
+    "ramp_step": 20000,
+    "hold_step": 0,
+    "cool_step": 20000,
+    "timestep": 0.002,
+    "thermostat": "nose_hoover",
+    "ensemble": "npt",
+    "velocity_seed": 24680,
+    "dump_step": 200,
+    "rdf_bins": 200,
+    "rdf_cutoff": 5.0,
+    "rdf_interval": 100
+  }
+}
+```
 
 ## More Resources
 
