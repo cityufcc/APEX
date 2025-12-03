@@ -356,6 +356,152 @@ class Lat_param_T_Report(PropertyReport):
         )
         return table, df
 
+class AnnealingReport(PropertyReport):
+    @staticmethod
+    def _parse_interval_file(path):
+        temps, vatoms, steps, potes, etots, press = [], [], [], [], [], []
+        try:
+            with open(path, 'r') as fp:
+                for line in fp:
+                    line=line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 6:
+                        continue
+                    try:
+                        step = float(parts[0]); temp = float(parts[1]); vatom = float(parts[2])
+                        pote = float(parts[3]); etot = float(parts[4]); prs = float(parts[5])
+                    except Exception:
+                        continue
+                    steps.append(step); temps.append(temp); vatoms.append(vatom)
+                    potes.append(pote); etots.append(etot); press.append(prs)
+        except Exception:
+            pass
+        return steps, temps, vatoms, potes, etots, press
+
+    @staticmethod
+    def _parse_rdf_last_block(path):
+        # Expect LAMMPS fix ave/time vector file with repeating blocks:
+        # header; then: "<TimeStep> <Nrow>" followed by Nrow lines: "i r g coord".
+        rs, gr = [], []
+        try:
+            with open(path, 'r') as fp:
+                lines = [l.strip() for l in fp if l.strip()]
+            # scan from end to find last "timestep nrow" header
+            idx = len(lines)-1
+            while idx >= 0:
+                if lines[idx][0] == '#':
+                    idx -= 1; continue
+                head = lines[idx].split()
+                if len(head) == 2 and head[0].isdigit():
+                    # start of block
+                    try:
+                        nrow = int(head[1])
+                    except Exception:
+                        break
+                    start = idx+1
+                    block = lines[start:start+nrow]
+                    rs = []; gr = []
+                    for row in block:
+                        cols = row.split()
+                        if len(cols) >= 3:
+                            try:
+                                r = float(cols[1]); g = float(cols[2])
+                            except Exception:
+                                continue
+                            rs.append(r); gr.append(g)
+                    break
+                idx -= 1
+        except Exception:
+            pass
+        return rs, gr
+
+    @staticmethod
+    def plotly_graph(res_data: dict, name: str, **kwargs):
+        import os
+        prop_dir = kwargs.get('prop_dir')
+        # aggregate all tasks
+        heat_T, heat_V = [], []
+        cool_T, cool_V = [], []
+        rdf_r, rdf_g = [], []
+        if prop_dir and os.path.isdir(prop_dir):
+            tasks = [t for t in os.listdir(prop_dir) if t.startswith('task.') and os.path.isdir(os.path.join(prop_dir, t))]
+            tasks.sort()
+            for t in tasks:
+                tdir = os.path.join(prop_dir, t)
+                hs = os.path.join(tdir, 'heating_interval.dat')
+                cs = os.path.join(tdir, 'cooling_interval.dat')
+                if os.path.isfile(hs):
+                    _, T, V, *_ = AnnealingReport._parse_interval_file(hs)
+                    heat_T.extend(T); heat_V.extend(V)
+                if os.path.isfile(cs):
+                    _, T, V, *_ = AnnealingReport._parse_interval_file(cs)
+                    cool_T.extend(T); cool_V.extend(V)
+                if not rdf_r:  # take first available rdf
+                    rc = os.path.join(tdir, 'rdf_cool.dat')
+                    if os.path.isfile(rc):
+                        rdf_r, rdf_g = AnnealingReport._parse_rdf_last_block(rc)
+
+        traces = []
+        # scatter: Vatom vs Temp
+        if heat_T and heat_V:
+            traces.append(go.Scatter(x=heat_T, y=heat_V, mode='markers', name=f'{name} Heating',
+                                     marker=dict(color='rgb(239,85,59)', size=6)))  # warm
+        if cool_T and cool_V:
+            traces.append(go.Scatter(x=cool_T, y=cool_V, mode='markers', name=f'{name} Cooling',
+                                     marker=dict(color='rgb(31,119,180)', size=6)))  # cool
+        # RDF: g(r)
+        if rdf_r and rdf_g:
+            traces.append(go.Scatter(x=rdf_r, y=rdf_g, mode='lines', name=f'{name} g(r)',
+                                     xaxis='x2', yaxis='y2', line=dict(color='rgb(99,110,250)')))
+
+        layout = go.Layout(
+            title='Annealing Summary',
+            xaxis=dict(title='Temperature (K)', domain=[0.0, 1.0]),
+            yaxis=dict(title='Vatom (A^3/atom)', domain=[0.55, 1.0]),
+            xaxis2=dict(title='r (Å)', domain=[0.0, 1.0], anchor='y2'),
+            yaxis2=dict(title='g(r)', domain=[0.0, 0.45])
+        )
+        return traces, layout
+
+    @staticmethod
+    def dash_table(res_data: dict, decimal: int = 6, **kwargs) -> dash_table.DataTable:
+        import os
+        prop_dir = kwargs.get('prop_dir')
+        rows = []
+        if prop_dir and os.path.isdir(prop_dir):
+            tasks = [t for t in os.listdir(prop_dir) if t.startswith('task.') and os.path.isdir(os.path.join(prop_dir, t))]
+            tasks.sort()
+            for t in tasks:
+                tdir = os.path.join(prop_dir, t)
+                for stage, fname in [('heating', 'heating_interval.dat'), ('cooling', 'cooling_interval.dat')]:
+                    f = os.path.join(tdir, fname)
+                    if not os.path.isfile(f):
+                        continue
+                    steps, temps, vatoms, potes, etots, press = AnnealingReport._parse_interval_file(f)
+                    for s, T, V, pe, et, pr in zip(steps, temps, vatoms, potes, etots, press):
+                        rows.append({
+                            'Task': t,
+                            'Stage': stage,
+                            'TimeStep': int(s) if abs(s-round(s))<1e-6 else s,
+                            'Temp (K)': round(T, decimal),
+                            'Vatom (A^3/atom)': round(V, decimal),
+                            'pote (eV)': round(pe, decimal),
+                            'Etotal (eV)': round(et, decimal),
+                            'Press': round(pr, decimal),
+                        })
+        df = pd.DataFrame(rows)
+        table = dash_table.DataTable(
+            data=df.to_dict('records'),
+            columns=[{'name': i, 'id': i} for i in df.columns],
+            style_table={'width': TABLE_WIDTH,
+                         'minWidth': TABLE_MIN_WIDTH,
+                         'overflowX': 'auto'},
+            style_cell={'textAlign': 'left'}
+        )
+        return table, df
+
 class ElasticReport(PropertyReport):
     @staticmethod
     def plotly_graph(res_data: dict, name: str, **kwargs):

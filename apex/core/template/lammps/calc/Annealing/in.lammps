@@ -1,0 +1,59 @@
+# APEX LAMMPS template: Annealing (equilibrate -> heat -> optional hold -> cool)
+# Variables expected from variable_Annealing.in (written by the property class):
+#   start_temp, target_temp, end_temp, equi_step, ramp_step, hold_step,
+#   cool_step, nx, ny, nz, rdf_interval, dump_step
+include  variable_Annealing.in
+
+clear
+units 	metal
+dimension	3
+boundary	p p p
+atom_style	atomic
+{{OPTIONAL_PRESET}}box         tilt large
+read_data   conf.lmp
+replicate   ${nx} ${ny} ${nz}
+{{MASS_LINES}}neigh_modify    every 1 delay 0 check no
+{{INTERACTION}}compute         mype all pe
+thermo          100
+thermo_style    custom step temp pe pxx pyy pzz pxy pxz pyz lx ly lz vol c_mype
+timestep ${timestep}
+variable        N equal step
+variable        V equal vol
+variable        Vatom equal ${V}/count(all)
+variable        Temp equal temp
+variable        pote equal c_mype
+variable        Etotal equal etotal
+variable        Press equal press
+variable        stepVal equal step
+compute myRDF all rdf ${rdf_bins} cutoff ${rdf_cutoff}
+
+# Initialize and equilibrate at start temperature
+velocity all create ${start_temp} ${velocity_seed} mom yes rot yes dist gaussian
+fix 1 all npt temp ${start_temp} ${start_temp} ${tdamp} x 0.0 0.0 ${pdamp} y 0.0 0.0 ${pdamp} z 0.0 0.0 ${pdamp}
+run ${equi_step}
+unfix 1
+
+# Heat to target temperature
+fix 1 all npt temp ${start_temp} ${target_temp} ${tdamp} x 0.0 0.0 ${pdamp} y 0.0 0.0 ${pdamp} z 0.0 0.0 ${pdamp}
+dump            1 all custom  ${dump_step} dump.anneal_ramp id type xs ys zs fx fy fz
+fix heat_log all print ${rdf_interval} "${stepVal} ${Temp} ${Vatom} ${pote} ${Etotal} ${Press}" file heating_interval.dat screen no title "# TimeStep Temp Vatom pote Etotal Press"
+run ${ramp_step}
+unfix heat_log
+undump 1
+unfix 1
+
+# Optional hold
+if "${hold_step} > 0" then "fix 1 all nvt temp ${target_temp} ${target_temp} ${tdamp}" "run ${hold_step}" "unfix 1"
+
+# Cool to end temperature
+fix 1 all npt temp ${target_temp} ${end_temp} ${tdamp} x 0.0 0.0 ${pdamp} y 0.0 0.0 ${pdamp} z 0.0 0.0 ${pdamp}
+dump            2 all custom  ${dump_step} dump.anneal_cool id type xs ys zs fx fy fz
+fix rdf_cool all ave/time ${rdf_interval} 1 ${rdf_interval} c_myRDF[*] file rdf_cool.dat mode vector
+fix cool_log all print ${rdf_interval} "${stepVal} ${Temp} ${Vatom} ${pote} ${Etotal} ${Press}" file cooling_interval.dat screen no title "# TimeStep Temp Vatom pote Etotal Press"
+run ${cool_step}
+unfix cool_log
+unfix rdf_cool
+undump 2
+unfix 1
+
+print "All done"

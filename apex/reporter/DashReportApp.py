@@ -42,6 +42,8 @@ def return_prop_class(prop_type: str):
         return DecohesiveReport
     elif prop_type == 'Lat':# Lat represent Lat_param_T
         return Lat_param_T_Report
+    elif prop_type in ('annealing', 'Annealing'):
+        return AnnealingReport
 
 
 def return_prop_type(prop: str):
@@ -139,9 +141,12 @@ class DashReportApp:
 
     def generate_layout(self):
         for w in self.datasets.values():
-            self.all_confs.update(w.keys())
-            for conf in w.values():
-                self.all_props.update(conf.keys())
+            if isinstance(w, dict):
+                # exclude meta keys in conf list
+                self.all_confs.update([k for k in w.keys() if k not in ('_meta_work_path', 'work_path', 'archive_key')])
+                for conf in w.values():
+                    if isinstance(conf, dict):
+                        self.all_props.update(conf.keys())
 
         # find the first default combination of configuration and property exist
         default_conf = None
@@ -195,7 +200,14 @@ class DashReportApp:
                 try:
                     _ = dataset[selected_confs][selected_prop]
                 except KeyError:
-                    pass
+                    # filesystem fallback: if property dir exists (any prop)
+                    import os as _os
+                    base = dataset.get('_meta_work_path', w_conf)
+                    prop_dir = _os.path.join(base, selected_confs, selected_prop)
+                    if _os.path.isdir(prop_dir):
+                        # for most props, consider result.json existence to mark visibility
+                        if _os.path.isfile(_os.path.join(prop_dir, 'result.json')):
+                            valid_count += 1
                 else:
                     valid_count += 1
         if prop_type in NO_GRAPH_LIST or valid_count == 0:
@@ -205,11 +217,22 @@ class DashReportApp:
 
     def update_dropdown_options(self, selected_confs):
         all_props = set()
+        # collect from archived results
         for w in self.datasets.values():
-            if selected_confs in w:
-                all_props.update(w[selected_confs].keys())
-
-        return [{'label': name, 'value': name} for name in all_props]
+            if isinstance(w, dict) and selected_confs in w and isinstance(w[selected_confs], dict):
+                all_props.update([k for k in w[selected_confs].keys() if k not in ('_meta_work_path', 'work_path', 'archive_key')])
+        # fallback: scan filesystem for property dirs when archive lacks details
+        if not all_props:
+            import os as _os
+            for w_key, w in self.datasets.items():
+                base = w.get('_meta_work_path', w_key)
+                conf_dir = _os.path.join(base, selected_confs)
+                if _os.path.isdir(conf_dir):
+                    for d in sorted(_os.listdir(conf_dir)):
+                        p = _os.path.join(conf_dir, d)
+                        if _os.path.isdir(p) and d not in ('relaxation',):
+                            all_props.add(d)
+        return [{'label': name, 'value': name} for name in sorted(all_props)]
 
     def update_graph(self, selected_prop, selected_confs):
         fig = go.Figure()
@@ -220,35 +243,52 @@ class DashReportApp:
                 try:
                     data = dataset[selected_confs][selected_prop]['result']
                 except KeyError:
-                    pass
+                    data = None
                 else:
-                    propCls = return_prop_class(prop_type)
-                    trace_name = w_conf
-                    extra = {}
-                    if prop_type == 'Lat':
-                        try:
-                            cell = dataset[selected_confs]['relaxation']['result']['data']['cells'][-1]
-                            a0 = (cell[0][0]**2 + cell[0][1]**2 + cell[0][2]**2)**0.5
-                            b0 = (cell[1][0]**2 + cell[1][1]**2 + cell[1][2]**2)**0.5
-                            c0 = (cell[2][0]**2 + cell[2][1]**2 + cell[2][2]**2)**0.5
-                            extra['relax_abc'] = (a0, b0, c0)
-                        except Exception:
-                            pass
-                    traces, layout = propCls.plotly_graph(
-                        data, trace_name,
-                        color=next(color_generator), **extra
-                    )
-                    # set color and width of reference lines
-                    if prop_type != 'vacancy':
-                        for trace in iter(traces):
-                            if trace_name.split('/')[-1] in ['DFT', 'REF']:
-                                trace.update({'line': {'color': 'black', 'width': REF_LINE_SIZE},
-                                              'marker': {'color': 'black', 'size': REF_MARKER_SIZE}})
-                            else:
-                                trace.update({'line': {'width': LINE_SIZE}}, marker={'size': MARKER_SIZE})
-                    fig.add_traces(traces)
-                    fig.layout = layout
-                    fig.update_layout(
+                    pass
+                propCls = return_prop_class(prop_type)
+                trace_name = w_conf
+                extra = {}
+                if prop_type == 'Lat':
+                    try:
+                        cell = dataset[selected_confs]['relaxation']['result']['data']['cells'][-1]
+                        a0 = (cell[0][0]**2 + cell[0][1]**2 + cell[0][2]**2)**0.5
+                        b0 = (cell[1][0]**2 + cell[1][1]**2 + cell[1][2]**2)**0.5
+                        c0 = (cell[2][0]**2 + cell[2][1]**2 + cell[2][2]**2)**0.5
+                        extra['relax_abc'] = (a0, b0, c0)
+                    except Exception:
+                        pass
+                # supply filesystem paths if needed (e.g., annealing needs prop_dir to read dat files)
+                if return_prop_class(prop_type) is AnnealingReport:
+                    import os as _os
+                    base = dataset.get('_meta_work_path', w_conf)
+                    extra['prop_dir'] = _os.path.join(base, selected_confs, selected_prop)
+                # generic filesystem fallback: load result.json when not archived
+                if data is None:
+                    try:
+                        from monty.serialization import loadfn as _loadfn
+                        import os as _os
+                        base = dataset.get('_meta_work_path', w_conf)
+                        rj = _os.path.join(base, selected_confs, selected_prop, 'result.json')
+                        if _os.path.isfile(rj):
+                            data = _loadfn(rj)
+                    except Exception:
+                        data = None
+                traces, layout = propCls.plotly_graph(
+                    data or {}, trace_name,
+                    color=next(color_generator), **extra
+                )
+                # set color and width of reference lines
+                if prop_type != 'vacancy':
+                    for trace in iter(traces):
+                        if trace_name.split('/')[-1] in ['DFT', 'REF']:
+                            trace.update({'line': {'color': 'black', 'width': REF_LINE_SIZE},
+                                          'marker': {'color': 'black', 'size': REF_MARKER_SIZE}})
+                        else:
+                            trace.update({'line': {'width': LINE_SIZE}}, marker={'size': MARKER_SIZE})
+                fig.add_traces(traces)
+                fig.layout = layout
+                fig.update_layout(
                         font=dict(
                             family="Arial, sans-serif",
                             size=PLOT_FRONTSIZE,
@@ -323,41 +363,54 @@ class DashReportApp:
                 table_index += 1
         else:
             for w_conf, dataset in self.datasets.items():
+                data = None
                 try:
                     data = dataset[selected_confs][selected_prop]['result']
                 except KeyError:
-                    pass
-                else:
-                    propCls = return_prop_class(prop_type)
-                    table_title = html.H3(
-                        f"{w_conf} - {selected_confs} - {selected_prop}",
-                        style={"fontSize": UI_FRONTSIZE}
-                    )
-                    extra = {}
-                    if prop_type == 'Lat':
-                        try:
-                            cell = dataset[selected_confs]['relaxation']['result']['data']['cells'][-1]
-                            a0 = (cell[0][0]**2 + cell[0][1]**2 + cell[0][2]**2)**0.5
-                            b0 = (cell[1][0]**2 + cell[1][1]**2 + cell[1][2]**2)**0.5
-                            c0 = (cell[2][0]**2 + cell[2][1]**2 + cell[2][2]**2)**0.5
-                            extra['relax_abc'] = (a0, b0, c0)
-                        except Exception:
-                            pass
-                    table, df = propCls.dash_table(data, **extra)
-                    table.id = f"table-{table_index}"
-                    # add strips to table
-                    table.style_data_conditional = [
-                        {'if': {'row_index': 'odd'},
-                            'backgroundColor': 'rgb(248, 248, 248)'}
-                    ]
-                    # add clipboards
-                    clip_id = f"clip-{table_index}"
-                    clipboard = dcc.Clipboard(id=clip_id, style={"fontSize": UI_FRONTSIZE})
-                    tables.append(
-                        html.Div([table_title, clipboard, table],
-                                 style={'width': '50%', 'display': 'inline-block'})
-                    )
-                    table_index += 1
+                    # generic filesystem fallback for table
+                    try:
+                        from monty.serialization import loadfn as _loadfn
+                        import os as _os
+                        base = dataset.get('_meta_work_path', w_conf)
+                        rj = _os.path.join(base, selected_confs, selected_prop, 'result.json')
+                        if _os.path.isfile(rj):
+                            data = _loadfn(rj)
+                    except Exception:
+                        data = None
+                propCls = return_prop_class(prop_type)
+                table_title = html.H3(
+                    f"{w_conf} - {selected_confs} - {selected_prop}",
+                    style={"fontSize": UI_FRONTSIZE}
+                )
+                extra = {}
+                if prop_type == 'Lat':
+                    try:
+                        cell = dataset[selected_confs]['relaxation']['result']['data']['cells'][-1]
+                        a0 = (cell[0][0]**2 + cell[0][1]**2 + cell[0][2]**2)**0.5
+                        b0 = (cell[1][0]**2 + cell[1][1]**2 + cell[1][2]**2)**0.5
+                        c0 = (cell[2][0]**2 + cell[2][1]**2 + cell[2][2]**2)**0.5
+                        extra['relax_abc'] = (a0, b0, c0)
+                    except Exception:
+                        pass
+                if return_prop_class(prop_type) is AnnealingReport:
+                    import os as _os
+                    base = dataset.get('_meta_work_path', w_conf)
+                    extra['prop_dir'] = _os.path.join(base, selected_confs, selected_prop)
+                table, df = propCls.dash_table(data or {}, **extra)
+                table.id = f"table-{table_index}"
+                # add strips to table
+                table.style_data_conditional = [
+                    {'if': {'row_index': 'odd'},
+                        'backgroundColor': 'rgb(248, 248, 248)'}
+                ]
+                # add clipboards
+                clip_id = f"clip-{table_index}"
+                clipboard = dcc.Clipboard(id=clip_id, style={"fontSize": UI_FRONTSIZE})
+                tables.append(
+                    html.Div([table_title, clipboard, table],
+                             style={'width': '50%', 'display': 'inline-block'})
+                )
+                table_index += 1
 
         self._generate_dynamic_callbacks(table_index)
 
@@ -396,7 +449,13 @@ class DashReportApp:
         print('NOTE: Do not over-refresh the page as duplicate errors may occur. '
               'If did, stop the server and re-execute the apex report command.')
         # Bind explicitly to localhost; avoid relying on hostname
-        self.app.run_server(host=host, port=port, debug=debug, use_reloader=use_reloader)
+        # Dash>=2.18 deprecates run_server in favor of run
+        run_fn = getattr(self.app, 'run', None)
+        if callable(run_fn):
+            self.app.run(host=host, port=port, debug=debug, use_reloader=use_reloader)
+        else:
+            # fallback for older Dash
+            self.app.run_server(host=host, port=port, debug=debug, use_reloader=use_reloader)
 
     @staticmethod
     def open_webpage():

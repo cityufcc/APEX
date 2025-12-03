@@ -132,7 +132,8 @@ class Lat_param_T(Property):
                     CONTCAR = "CONTCAR"
                     POSCAR = "POSCAR"
                 equi_contcar = os.path.join(path_to_equi, CONTCAR)
-                fallback_poscar = os.path.join(os.path.dirname(path_to_equi), POSCAR)
+                # Fallback should point to the conf directory POSCAR (two levels up from relax_task)
+                fallback_poscar = os.path.join(os.path.dirname(os.path.dirname(path_to_equi)), POSCAR)
                 # prefer relaxed CONTCAR; fallback to initial POSCAR under conf dir
                 if os.path.isfile(equi_contcar):
                     src_pos = equi_contcar
@@ -228,7 +229,11 @@ class Lat_param_T(Property):
                 temp = self.parameter["cal_setting"]["temperature"][num]
                 supercell_size = self.supercell_size
                 num += 1
-                with open(os.path.join(ii, "average_box.txt"), 'r') as file:
+                avg_file = os.path.join(ii, "average_box.txt")
+                if not os.path.isfile(avg_file):
+                    logging.warning(f"Lat_param_T: missing average_box.txt, skip: {avg_file}")
+                    continue
+                with open(avg_file, 'r') as file:
                     for line in file:
                         if line.startswith("#") or line.strip() == "":
                             continue

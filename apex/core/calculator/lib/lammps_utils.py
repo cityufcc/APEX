@@ -12,6 +12,10 @@ from apex.core.constants import PERIOD_ELEMENTS_BY_SYMBOL
 from dflow.python import upload_packages
 upload_packages.append(__file__)
 
+TEMPLATE_MARK_INTERACTION = "{{INTERACTION}}"  # replaced with pair_style/pair_coeff block
+TEMPLATE_MARK_MASSES = "{{MASS_LINES}}"        # replaced with element mass lines
+TEMPLATE_MARK_PRESET = "{{OPTIONAL_PRESET}}"   # replaced with extra settings (e.g., mace)
+
 
 def cvt_lammps_conf(fin, fout, type_map, ofmt="lammps/data"):
     """
@@ -465,8 +469,33 @@ def make_lammps_Lat_param_T(conf, type_map, interaction, param, cal_setting=None
         ensemble = cal_setting.get("ensemble", ensemble)
         velocity_seed = cal_setting.get("velocity_seed", velocity_seed)
 
+    # If a template string has been provided (directly or via file path),
+    # prefer it and only perform minimal placeholder substitution. This lets
+    # us maintain LAMMPS inputs as files in apex/core/template/... and keep
+    # Python logic focused on filling in pair_style/masses.
+    if cal_setting is not None:
+        # priority 1: explicit file path
+        template_in = cal_setting.get("template_in")
+        if template_in and os.path.isfile(template_in):
+            with open(template_in, "r", encoding="utf-8") as fp:
+                tmpl = fp.read()
+            mass_lines = "".join(
+                ["mass            %d %.3f\n" % (i + 1, Element(type_map_list[i]).mass)
+                 for i in range(len(type_map_list))]
+            )
+            inter_block = interaction(param)
+            mace_preset = "atom_modify map yes\nnewton on\n" if param.get("type") == "mace" else ""
+            return (
+                tmpl
+                .replace(TEMPLATE_MARK_MASSES, mass_lines)
+                .replace(TEMPLATE_MARK_INTERACTION, inter_block)
+                .replace(TEMPLATE_MARK_PRESET, mace_preset)
+            )
+
     ret = ""
     ret += "include  variable_Lat_param_T.in\n"
+    # Derived initial temperature variable (user request): temp_init = 2*temperature
+    ret += "variable temp_init equal 2*${temperature}\n"
     ret += "clear\n"
     ret += "units 	metal\n"
     ret += "dimension	3\n"
@@ -620,12 +649,22 @@ def make_lammps_annealing(conf, type_map, interaction, param, cal_setting):
     # Power-user override: if a user template is provided, return its content.
     if cal_setting is not None:
         template_in = cal_setting.get("template_in")
-        if template_in:
-            try:
-                with open(template_in, "r") as fp:
-                    return fp.read()
-            except Exception:
-                pass
+        if template_in and os.path.isfile(template_in):
+            with open(template_in, "r", encoding="utf-8") as fp:
+                tmpl = fp.read()
+            type_map_list = element_list(type_map)
+            mass_lines = "".join(
+                ["mass            %d %.3f\n" % (i + 1, Element(type_map_list[i]).mass)
+                 for i in range(len(type_map_list))]
+            )
+            inter_block = interaction(param)
+            mace_preset = "atom_modify map yes\nnewton on\n" if param.get("type") == "mace" else ""
+            return (
+                tmpl
+                .replace(TEMPLATE_MARK_MASSES, mass_lines)
+                .replace(TEMPLATE_MARK_INTERACTION, inter_block)
+                .replace(TEMPLATE_MARK_PRESET, mace_preset)
+            )
     type_map_list = element_list(type_map)
     dump_step = int(cal_setting.get("dump_step", 1000))
     tdamp = cal_setting.get("tdamp", 100)
@@ -651,6 +690,18 @@ def make_lammps_annealing(conf, type_map, interaction, param, cal_setting):
     ret += "compute         mype all pe\n"
     ret += "thermo          100\n"
     ret += ("thermo_style    custom step temp pe pxx pyy pzz pxy pxz pyz lx ly lz vol c_mype\n")
+    # common variables used in logging/prints
+    ret += "timestep ${timestep}\n"
+    ret += "variable        N equal step\n"
+    ret += "variable        V equal vol\n"
+    ret += "variable        Vatom equal ${V}/count(all)\n"
+    ret += "variable        Temp equal temp\n"
+    ret += "variable        pote equal c_mype\n"
+    ret += "variable        Etotal equal etotal\n"
+    ret += "variable        Press equal press\n"
+    ret += "variable        stepVal equal step\n"
+    # RDF compute for optional averaging
+    ret += "compute myRDF all rdf ${rdf_bins} cutoff ${rdf_cutoff}\n"
 
     # Initialize velocities and equilibrate at start_temp
     ret += f"velocity all create ${{start_temp}} {vseed} mom yes rot yes dist gaussian\n"
@@ -687,10 +738,9 @@ def make_lammps_annealing(conf, type_map, interaction, param, cal_setting):
         else:
             ret += f"fix 1 all npt temp ${{start_temp}} ${{target_temp}} {tdamp} x 0.0 0.0 {pdamp} y 0.0 0.0 {pdamp} z 0.0 0.0 {pdamp}\n"
     ret += f"dump            1 all custom  {dump_step} dump.anneal_ramp id type xs ys zs fx fy fz\n"
-    ret += "fix heat_log all print ${rdf_interval} \"v_stepVal v_N v_Temp v_Vatom v_pote v_Etotal v_Press\" file heating_interval.dat screen no title \"# TimeStep v_N v_Temp v_Vatom v_pote v_Etotal v_Press\"\n"
+    ret += "fix heat_log all print ${rdf_interval} \"${stepVal} ${Temp} ${Vatom} ${pote} ${Etotal} ${Press}\" file heating_interval.dat screen no title \"# TimeStep Temp Vatom pote Etotal Press\"\n"
     ret += "run ${ramp_step}\n"
     ret += "unfix heat_log\n"
-    ret += "unfix rdf_ramp\n"
     ret += "undump 1\n"
     ret += "unfix 1\n"
     if thermostat == "langevin":
@@ -713,7 +763,7 @@ def make_lammps_annealing(conf, type_map, interaction, param, cal_setting):
             ret += f"fix 1 all npt temp ${{target_temp}} ${{end_temp}} {tdamp} x 0.0 0.0 {pdamp} y 0.0 0.0 {pdamp} z 0.0 0.0 {pdamp}\n"
     ret += f"dump            2 all custom  {dump_step} dump.anneal_cool id type xs ys zs fx fy fz\n"
     ret += "fix rdf_cool all ave/time ${rdf_interval} 1 ${rdf_interval} c_myRDF[*] file rdf_cool.dat mode vector\n"
-    ret += "fix cool_log all print ${rdf_interval} \"v_stepVal v_N v_Temp v_Vatom v_pote v_Etotal v_Press\" file cooling_interval.dat screen no title \"# TimeStep v_N v_Temp v_Vatom v_pote v_Etotal v_Press\"\n"
+    ret += "fix cool_log all print ${rdf_interval} \"${stepVal} ${Temp} ${Vatom} ${pote} ${Etotal} ${Press}\" file cooling_interval.dat screen no title \"# TimeStep Temp Vatom pote Etotal Press\"\n"
     ret += "run ${cool_step}\n"
     ret += "unfix cool_log\n"
     ret += "unfix rdf_cool\n"

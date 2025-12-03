@@ -30,6 +30,7 @@ def tag_dataset(orig_dataset: dict) -> dict:
 
 def report_local(input_path_list):
     path_list = []
+    all_data_dict = {}
     for ii in input_path_list:
         glob_list = glob.glob(os.path.abspath(ii))
         path_list.extend(glob_list)
@@ -39,29 +40,56 @@ def report_local(input_path_list):
         raise RuntimeError('Invalid work path indicated. No path has been found!')
 
     file_path_list = []
+    dir_fallback_count = 0
     for jj in path_list:
         if os.path.isfile(jj) and is_json_file(jj):
             file_path_list.append(jj)
         elif os.path.isdir(jj) and os.path.isfile(os.path.join(jj, 'all_result.json')):
             file_path_list.append(os.path.join(jj, 'all_result.json'))
+        elif os.path.isdir(jj):
+            # Fallback: accept a work directory without all_result.json.
+            # Build a minimal dataset that allows the reporter to browse files directly.
+            workdir = os.path.abspath(jj)
+            all_data_dict[workdir] = {"_meta_work_path": workdir}
+            # Discover configurations under ./confs/* (first-level subdirs)
+            confs_root = os.path.join(workdir, 'confs')
+            if os.path.isdir(confs_root):
+                try:
+                    for name in sorted(os.listdir(confs_root)):
+                        p = os.path.join(confs_root, name)
+                        if os.path.isdir(p):
+                            conf_key = os.path.relpath(p, workdir)
+                            all_data_dict[workdir][conf_key] = {}
+                except Exception:
+                    pass
+            dir_fallback_count += 1
         else:
+            # keep behavior: invalid file path
             raise FileNotFoundError(f'Invalid work path or json file path provided: {jj}')
 
-    if not file_path_list:
+    if not file_path_list and dir_fallback_count == 0:
         raise FileNotFoundError(
             'all_result.json not exist or not under work path indicated. Please do result archive locally first.'
         )
-    all_data_dict = {}
+    # append archived datasets
+    # NOTE: dir fallback items may already be in all_data_dict, keep and update
+    # to avoid overwriting fallback _meta_work_path, update at depth 1
     for kk in file_path_list:
         data_dict = loadfn(kk)
         try:
             workdir_id = data_dict.pop('work_path')
             _ = data_dict.pop('archive_key')
+            # keep absolute work path for reporter filesystem fallbacks
+            data_dict.setdefault('_meta_work_path', workdir_id)
         except KeyError:
             logging.warning(msg=f'Invalid json for result archive, will skip: {kk}')
             continue
         else:
-            all_data_dict[workdir_id] = data_dict
+            if workdir_id in all_data_dict:
+                # merge shallowly
+                all_data_dict[workdir_id].update(data_dict)
+            else:
+                all_data_dict[workdir_id] = data_dict
 
     # simplify the work path key for all datasets
     simplified_dataset = tag_dataset(all_data_dict)

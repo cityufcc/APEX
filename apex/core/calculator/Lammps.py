@@ -142,6 +142,23 @@ class Lammps(Task):
 
         cal_type = task_param["cal_type"]
         cal_setting = task_param["cal_setting"]
+        # Auto-pick a default LAMMPS template if available under
+        # apex/core/template/lammps/calc/<task_type>/in.lammps. Users can still
+        # override via cal_setting["template_in"].
+        try:
+            here = os.path.dirname(__file__)  # apex/core/calculator
+            base = os.path.abspath(os.path.join(here, "..", "template", "lammps", "calc"))
+            candidates = [
+                os.path.join(base, task_type, "in.lammps"),
+                os.path.join(base, str(task_type).lower(), "in.lammps"),
+                os.path.join(base, str(task_type).capitalize(), "in.lammps"),
+            ]
+            for default_tmpl in candidates:
+                if os.path.isfile(default_tmpl) and "template_in" not in cal_setting:
+                    cal_setting["template_in"] = default_tmpl
+                    break
+        except Exception:
+            pass
         prop_type = task_param.get("type", "relaxation")
 
         etol = cal_setting.get("etol", 0)
